@@ -22,10 +22,14 @@ struct ContentView: View {
     @Query(sort: \Bookcase.name) private var bookcases: [Bookcase]
     @State private var selectedShelf: Shelf?
     @State private var selectedBookcaseName: String?
+    @State private var sidebarMode: SidebarMode = .category
+    @State private var readerBook: Book?
     @State private var librarySearchText = ""
+    @State private var importNoticeMessage: String?
     @AppStorage("systemLanguage") private var systemLanguage: SystemLanguage = .th
     @AppStorage("librarySortMode") private var librarySortMode: LibrarySortMode = .title
     @AppStorage("librarySortAscending") private var librarySortAscending = true
+    @AppStorage("libraryFavoritesOnly") private var libraryFavoritesOnly = false
 
     private var orderedBookcases: [Bookcase] {
         bookcases.sorted {
@@ -34,6 +38,10 @@ struct ContentView: View {
     }
 
     private var visibleBookcases: [Bookcase] {
+        if sidebarMode == .search || sidebarMode == .favorites {
+            return orderedBookcases
+        }
+
         if let selectedBookcaseName,
            let selectedBookcase = orderedBookcases.first(where: { $0.name == selectedBookcaseName }) {
             return [selectedBookcase]
@@ -48,7 +56,7 @@ struct ContentView: View {
             .flatMap { $0.importedBooks }
             .filter { $0.lastReadPage > 0 }
 
-        let filteredBooks = librarySearchQuery.isEmpty ? books : books.filter(matchesLibrarySearch)
+        let filteredBooks = books.filter(matchesLibraryFilters)
 
         return librarySortMode.sort(filteredBooks, ascending: librarySortAscending)
     }
@@ -60,8 +68,7 @@ struct ContentView: View {
     }
 
     private var filteredLibraryBookCount: Int {
-        guard !librarySearchQuery.isEmpty else { return allImportedBooks.count }
-        return allImportedBooks.filter(matchesLibrarySearch).count
+        allImportedBooks.filter(matchesLibraryFilters).count
     }
 
     private var librarySearchQuery: String {
@@ -69,10 +76,21 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            detailView
+        ZStack {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                NavigationStack {
+                    detailView
+                }
+            }
+
+            if let readerBook {
+                BookReaderView(book: readerBook, language: systemLanguage) {
+                    self.readerBook = nil
+                }
+                .zIndex(10)
+            }
         }
         .acceptsFirstMouse()
         .onAppear {
@@ -81,18 +99,72 @@ struct ContentView: View {
             selectedBookcaseName = selectedBookcaseName ?? orderedBookcases.first?.name
             selectedShelf = selectedShelf ?? orderedBookcases.first.flatMap { orderedShelves(for: $0).first }
         }
+        .alert(
+            L10n.text("import_notice", systemLanguage),
+            isPresented: Binding(
+                get: { importNoticeMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        importNoticeMessage = nil
+                    }
+                }
+            )
+        ) {
+            Button(L10n.text("ok", systemLanguage), role: .cancel) {
+                importNoticeMessage = nil
+            }
+        } message: {
+            Text(importNoticeMessage ?? "")
+        }
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
+                sidebarMenuButton(
+                    title: L10n.text("ebook_store", systemLanguage),
+                    systemImage: "bag",
+                    isSelected: sidebarMode == .store
+                ) {
+                    sidebarMode = .store
+                    selectedBookcaseName = nil
+                    libraryFavoritesOnly = false
+                    openEBookStore()
+                }
+
+                sidebarMenuButton(
+                    title: L10n.text("search", systemLanguage),
+                    systemImage: "magnifyingglass",
+                    isSelected: sidebarMode == .search
+                ) {
+                    sidebarMode = .search
+                    selectedBookcaseName = nil
+                    libraryFavoritesOnly = false
+                }
+
+                sidebarMenuButton(
+                    title: L10n.text("favorite_books", systemLanguage),
+                    systemImage: "star",
+                    isSelected: sidebarMode == .favorites
+                ) {
+                    sidebarMode = .favorites
+                    selectedBookcaseName = nil
+                    libraryFavoritesOnly = true
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 18)
+
             Text("หมวด")
                 .font(.title.bold())
                 .padding(.horizontal, 18)
-                .padding(.top, 18)
+                .padding(.top, 10)
 
             List(selection: $selectedBookcaseName) {
                 ForEach(orderedBookcases) { bookcase in
                     Button {
+                        sidebarMode = .category
+                        libraryFavoritesOnly = false
                         selectedBookcaseName = bookcase.name
                         selectedShelf = orderedShelves(for: bookcase).first
                     } label: {
@@ -121,6 +193,27 @@ struct ContentView: View {
         .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
     }
 
+    private func sidebarMenuButton(title: String, systemImage: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 18)
+                    .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.72))
+
+                Text(title)
+                    .fontWeight(.semibold)
+
+                Spacer()
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.82))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(isSelected ? Color.white.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(ImmediatePlainButtonStyle())
+    }
+
     private func sidebarTitle(for bookcase: Bookcase) -> String {
         L10n.text(bookcase.name, systemLanguage)
             .replacingOccurrences(of: "หมวดหมู่", with: "")
@@ -130,38 +223,51 @@ struct ContentView: View {
     private var detailView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                HeaderView(
-                    language: $systemLanguage,
-                    searchText: $librarySearchText,
-                    sortMode: $librarySortMode,
-                    sortAscending: $librarySortAscending,
-                    resultCount: filteredLibraryBookCount,
-                    totalCount: allImportedBooks.count
-                )
-
-                if !continueReadingBooks.isEmpty {
-                    ContinueReadingView(
-                        books: Array(continueReadingBooks.prefix(10)),
-                        language: systemLanguage
+                if sidebarMode == .store {
+                    EBookStoreView(language: systemLanguage)
+                } else {
+                    HeaderView(
+                        language: $systemLanguage,
+                        searchText: $librarySearchText,
+                        sortMode: $librarySortMode,
+                        sortAscending: $librarySortAscending,
+                        favoritesOnly: $libraryFavoritesOnly,
+                        resultCount: filteredLibraryBookCount,
+                        totalCount: allImportedBooks.count
                     )
                 }
 
-                ForEach(visibleBookcases) { bookcase in
-                    BookcaseView(
-                        bookcase: bookcase,
-                        shelves: orderedShelves(for: bookcase),
+                if sidebarMode != .store && !continueReadingBooks.isEmpty {
+                    ContinueReadingView(
+                        books: Array(continueReadingBooks.prefix(10)),
+                        bookcases: orderedBookcases,
                         language: systemLanguage,
-                        selectedShelf: selectedShelf,
-                        selectShelf: {
-                            selectedBookcaseName = bookcase.name
-                            selectedShelf = $0
-                        },
-                        importBook: { url, shelf in importBook(from: url, to: shelf) },
-                        deleteBook: deleteBook,
-                        searchText: librarySearchText,
-                        sortMode: librarySortMode,
-                        sortAscending: librarySortAscending
+                        openBook: openBook
                     )
+                }
+
+                if sidebarMode != .store {
+                    ForEach(visibleBookcases) { bookcase in
+                        BookcaseView(
+                            bookcase: bookcase,
+                            bookcases: orderedBookcases,
+                            shelves: orderedShelves(for: bookcase),
+                            language: systemLanguage,
+                            selectedShelf: selectedShelf,
+                            selectShelf: {
+                                sidebarMode = .category
+                                selectedBookcaseName = bookcase.name
+                                selectedShelf = $0
+                            },
+                            importBook: { url, shelf in importBook(from: url, to: shelf) },
+                            deleteBook: deleteBook,
+                            openBook: openBook,
+                            searchText: librarySearchText,
+                            sortMode: librarySortMode,
+                            sortAscending: librarySortAscending,
+                            favoritesOnly: libraryFavoritesOnly
+                        )
+                    }
                 }
             }
             .padding(24)
@@ -238,6 +344,11 @@ struct ContentView: View {
         }
 
         do {
+            if let duplicate = duplicateBook(for: sourceURL) {
+                importNoticeMessage = L10n.duplicateImportMessage(bookTitle: duplicate.title, systemLanguage)
+                return
+            }
+
             let storedURL = try BookFileStore.copyIntoLibrary(sourceURL)
             let coverURL = try? CoverImageStore.createCover(for: storedURL, format: format)
             let colors = ["#D95D39", "#2A9D8F", "#4F6F52", "#577590", "#8E6BBE", "#C77D3B", "#3B7A9E"]
@@ -255,9 +366,33 @@ struct ContentView: View {
         }
     }
 
+    private func duplicateBook(for sourceURL: URL) -> Book? {
+        guard let sourceSize = BookFileStore.fileSize(at: sourceURL) else { return nil }
+        let sourceName = sourceURL.lastPathComponent
+
+        return allImportedBooks.first { book in
+            guard let fileURL = book.fileURL,
+                  fileURL.lastPathComponent == sourceName,
+                  let storedSize = BookFileStore.fileSize(at: fileURL) else {
+                return false
+            }
+
+            return storedSize == sourceSize
+        }
+    }
+
     private func deleteBook(_ book: Book) {
         BookFileStore.removeStoredFiles(for: book)
         modelContext.delete(book)
+    }
+
+    private func openBook(_ book: Book) {
+        readerBook = book
+    }
+
+    private func openEBookStore() {
+        guard let url = URL(string: "http://localhost:3000") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func matchesLibrarySearch(_ book: Book) -> Bool {
@@ -266,6 +401,57 @@ struct ContentView: View {
             || book.displayFormat.localizedCaseInsensitiveContains(librarySearchQuery)
     }
 
+    private func matchesLibraryFilters(_ book: Book) -> Bool {
+        (!libraryFavoritesOnly || book.isFavorite)
+            && (librarySearchQuery.isEmpty || matchesLibrarySearch(book))
+    }
+
+}
+
+private enum SidebarMode {
+    case category
+    case store
+    case search
+    case favorites
+}
+
+private struct EBookStoreView: View {
+    let language: SystemLanguage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                Image(systemName: "bag")
+                    .font(.system(size: 22, weight: .bold))
+                    .frame(width: 44, height: 44)
+                    .foregroundStyle(.white)
+                    .background(Color.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(L10n.text("ebook_store", language))
+                        .font(.largeTitle.bold())
+
+                    Text(L10n.text("ebook_store_description", language))
+                        .font(.headline)
+                        .foregroundStyle(.white.opacity(0.68))
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text(L10n.text("ebook_store_coming_soon", language))
+                    .font(.title2.bold())
+
+                Text(L10n.text("ebook_store_note", language))
+                    .font(.body)
+                    .foregroundStyle(.white.opacity(0.68))
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 private struct HeaderView: View {
@@ -273,6 +459,7 @@ private struct HeaderView: View {
     @Binding var searchText: String
     @Binding var sortMode: LibrarySortMode
     @Binding var sortAscending: Bool
+    @Binding var favoritesOnly: Bool
     let resultCount: Int
     let totalCount: Int
 
@@ -325,7 +512,19 @@ private struct HeaderView: View {
                 .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
                 .help(sortAscending ? L10n.text("sort_ascending", language) : L10n.text("sort_descending", language))
 
-                if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Button {
+                    favoritesOnly.toggle()
+                } label: {
+                    Image(systemName: favoritesOnly ? "star.fill" : "star")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(favoritesOnly ? Color.yellow : Color.white.opacity(0.78))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(ImmediatePlainButtonStyle())
+                .background(.white.opacity(favoritesOnly ? 0.18 : 0.10), in: RoundedRectangle(cornerRadius: 7))
+                .help(L10n.text("favorites_only", language))
+
+                if favoritesOnly || !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(searchResultText)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.white.opacity(0.68))
@@ -391,7 +590,10 @@ private struct LibrarySearchField: NSViewRepresentable {
 private enum LibrarySortMode: String, CaseIterable, Identifiable {
     case title
     case format
+    case favorite
     case progress
+    case lastOpened
+    case dateAdded
 
     var id: String { rawValue }
 
@@ -401,8 +603,14 @@ private enum LibrarySortMode: String, CaseIterable, Identifiable {
             return "textformat.abc"
         case .format:
             return "doc.on.doc"
+        case .favorite:
+            return "star"
         case .progress:
             return "chart.line.uptrend.xyaxis"
+        case .lastOpened:
+            return "clock"
+        case .dateAdded:
+            return "calendar.badge.plus"
         }
     }
 
@@ -412,8 +620,14 @@ private enum LibrarySortMode: String, CaseIterable, Identifiable {
             return L10n.text("sort_title", language)
         case .format:
             return L10n.text("sort_format", language)
+        case .favorite:
+            return L10n.text("sort_favorite", language)
         case .progress:
             return L10n.text("sort_progress", language)
+        case .lastOpened:
+            return L10n.text("sort_last_opened", language)
+        case .dateAdded:
+            return L10n.text("sort_date_added", language)
         }
     }
 
@@ -428,9 +642,31 @@ private enum LibrarySortMode: String, CaseIterable, Identifiable {
                     return formatOrder == .orderedAscending
                 }
                 return first.title.localizedStandardCompare(second.title) == .orderedAscending
+            case .favorite:
+                if first.isFavorite != second.isFavorite {
+                    return first.isFavorite && !second.isFavorite
+                }
+                return first.title.localizedStandardCompare(second.title) == .orderedAscending
             case .progress:
+                if first.readingProgressFraction != second.readingProgressFraction {
+                    return first.readingProgressFraction > second.readingProgressFraction
+                }
                 if first.lastReadPage != second.lastReadPage {
                     return first.lastReadPage > second.lastReadPage
+                }
+                return first.title.localizedStandardCompare(second.title) == .orderedAscending
+            case .lastOpened:
+                let firstDate = first.lastOpenedAt ?? .distantPast
+                let secondDate = second.lastOpenedAt ?? .distantPast
+                if firstDate != secondDate {
+                    return firstDate > secondDate
+                }
+                return first.title.localizedStandardCompare(second.title) == .orderedAscending
+            case .dateAdded:
+                let firstDate = first.dateAdded ?? .distantPast
+                let secondDate = second.dateAdded ?? .distantPast
+                if firstDate != secondDate {
+                    return firstDate > secondDate
                 }
                 return first.title.localizedStandardCompare(second.title) == .orderedAscending
             }
@@ -442,7 +678,9 @@ private enum LibrarySortMode: String, CaseIterable, Identifiable {
 
 private struct ContinueReadingView: View {
     let books: [Book]
+    let bookcases: [Bookcase]
     let language: SystemLanguage
+    let openBook: (Book) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -453,7 +691,7 @@ private struct ContinueReadingView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 14) {
                     ForEach(books) { book in
-                        ContinueReadingBookView(book: book, language: language)
+                        ContinueReadingBookView(book: book, bookcases: bookcases, language: language, openBook: openBook)
                     }
                 }
                 .padding(.vertical, 2)
@@ -465,13 +703,16 @@ private struct ContinueReadingView: View {
 
 private struct ContinueReadingBookView: View {
     let book: Book
+    let bookcases: [Bookcase]
     let language: SystemLanguage
+    let openBook: (Book) -> Void
     @State private var isRenaming = false
+    @State private var isShowingDetails = false
     @State private var draftTitle = ""
 
     var body: some View {
-        NavigationLink {
-            BookReaderView(book: book, language: language)
+        Button {
+            openBook(book)
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 BookSpineView(book: book)
@@ -483,7 +724,7 @@ private struct ContinueReadingBookView: View {
                     .lineLimit(2)
                     .frame(width: 110, alignment: .leading)
 
-                Text("\(L10n.text("page", language)) \(book.lastReadPage + 1)")
+                Text(book.readingProgressLabel(language))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.62))
             }
@@ -497,9 +738,15 @@ private struct ContinueReadingBookView: View {
         }
         .buttonStyle(ImmediatePlainButtonStyle())
         .contextMenu {
-            BookFileContextActions(book: book, language: language)
+            BookFileContextActions(book: book, language: language) {
+                isShowingDetails = true
+            }
 
             Divider()
+
+            BookFavoriteContextAction(book: book, language: language)
+
+            BookMoveContextActions(book: book, bookcases: bookcases, language: language)
 
             Button {
                 draftTitle = book.title
@@ -521,6 +768,9 @@ private struct ContinueReadingBookView: View {
             }
             Button(L10n.text("cancel", language), role: .cancel) {}
         }
+        .sheet(isPresented: $isShowingDetails) {
+            BookDetailsView(book: book, language: language, openBook: openBook)
+        }
     }
 
     private func saveTitle() {
@@ -533,9 +783,18 @@ private struct ContinueReadingBookView: View {
 private struct BookFileContextActions: View {
     let book: Book
     let language: SystemLanguage
+    let showDetails: () -> Void
 
     var body: some View {
+        Button {
+            showDetails()
+        } label: {
+            Label(L10n.text("book_details", language), systemImage: "info.circle")
+        }
+
         if book.fileURL != nil {
+            Divider()
+
             Button {
                 BookFileActions.revealInFinder(book)
             } label: {
@@ -548,6 +807,89 @@ private struct BookFileContextActions: View {
                 Label(L10n.text("copy_file_path", language), systemImage: "doc.on.doc")
             }
         }
+    }
+}
+
+private struct BookFavoriteContextAction: View {
+    let book: Book
+    let language: SystemLanguage
+
+    var body: some View {
+        Button {
+            book.isFavorite.toggle()
+        } label: {
+            Label(
+                L10n.text(book.isFavorite ? "remove_from_favorites" : "add_to_favorites", language),
+                systemImage: book.isFavorite ? "star.slash" : "star"
+            )
+        }
+    }
+}
+
+private struct BookMoveContextActions: View {
+    let book: Book
+    let bookcases: [Bookcase]
+    let language: SystemLanguage
+
+    private var availableBookcases: [Bookcase] {
+        bookcases.filter { !$0.shelves.isEmpty }
+    }
+
+    var body: some View {
+        if !availableBookcases.isEmpty {
+            Menu {
+                BookMoveMenuContent(book: book, bookcases: availableBookcases, language: language)
+            } label: {
+                Label(L10n.text("move_to_shelf", language), systemImage: "tray.and.arrow.down")
+            }
+        }
+    }
+}
+
+private struct BookMoveMenuContent: View {
+    let book: Book
+    let bookcases: [Bookcase]
+    let language: SystemLanguage
+
+    var body: some View {
+        ForEach(bookcases) { bookcase in
+            Menu {
+                ForEach(orderedShelves(for: bookcase)) { shelf in
+                    Button {
+                        moveBook(to: shelf)
+                    } label: {
+                        Label(
+                            L10n.text(shelf.name, language),
+                            systemImage: shelf.persistentModelID == book.shelf?.persistentModelID ? "checkmark" : "books.vertical"
+                        )
+                    }
+                    .disabled(shelf.persistentModelID == book.shelf?.persistentModelID)
+                }
+            } label: {
+                Label(L10n.text(bookcase.name, language), systemImage: bookcase.icon)
+            }
+        }
+    }
+
+    private func orderedShelves(for bookcase: Bookcase) -> [Shelf] {
+        guard let seed = BookcaseSeed.required.first(where: { $0.name == bookcase.name }) else {
+            return bookcase.shelves.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+
+        return bookcase.shelves.sorted {
+            (seed.shelves.firstIndex(of: $0.name) ?? Int.max) < (seed.shelves.firstIndex(of: $1.name) ?? Int.max)
+        }
+    }
+
+    private func moveBook(to shelf: Shelf) {
+        guard shelf.persistentModelID != book.shelf?.persistentModelID else { return }
+        if let currentShelf = book.shelf {
+            currentShelf.books.removeAll { $0.persistentModelID == book.persistentModelID }
+        }
+        if !shelf.books.contains(where: { $0.persistentModelID == book.persistentModelID }) {
+            shelf.books.append(book)
+        }
+        book.shelf = shelf
     }
 }
 
@@ -565,17 +907,375 @@ private enum BookFileActions {
     }
 }
 
+private struct BookDetailsView: View {
+    let book: Book
+    let language: SystemLanguage
+    let openBook: ((Book) -> Void)?
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    @Query(sort: \Bookcase.name) private var bookcases: [Bookcase]
+    @State private var didCopyPath = false
+    @State private var isEditingMetadata = false
+    @State private var isSelectingCover = false
+    @State private var isConfirmingDelete = false
+    @State private var draftTitle = ""
+    @State private var draftAuthor = ""
+    @State private var copyFeedbackTask: Task<Void, Never>?
+
+    private var orderedBookcases: [Bookcase] {
+        bookcases.sorted {
+            bookcaseIndex(for: $0.name) < bookcaseIndex(for: $1.name)
+        }
+    }
+
+    private var fileSizeText: String {
+        guard let url = book.fileURL, let size = BookFileStore.fileSize(at: url) else {
+            return "-"
+        }
+        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+
+    private var filePathText: String {
+        book.fileURL?.path ?? "-"
+    }
+
+    private var currentShelfText: String {
+        guard let shelf = book.shelf else { return "-" }
+        let shelfName = L10n.text(shelf.name, language)
+        guard let bookcaseName = shelf.bookcase?.name else { return shelfName }
+        return "\(L10n.text(bookcaseName, language)) / \(shelfName)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                Label(L10n.text("book_details", language), systemImage: "info.circle")
+                    .font(.title2.bold())
+
+                Spacer()
+
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.headline)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(ImmediatePlainButtonStyle())
+            }
+
+            HStack(alignment: .top, spacing: 18) {
+                BookSpineView(book: book)
+                    .frame(width: 80, height: 118, alignment: .top)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    detailRow(titleKey: "book_title", value: book.title)
+                    detailRow(titleKey: "author", value: book.author)
+                    detailRow(titleKey: "format", value: book.displayFormat)
+                    detailRow(titleKey: "current_shelf", value: currentShelfText)
+                    detailRow(titleKey: "file_size", value: fileSizeText)
+                    detailRow(titleKey: "favorite_status", value: L10n.text(book.isFavorite ? "yes" : "no", language))
+                    detailRow(titleKey: "last_read_page", value: book.readingPageLabel(language))
+                    detailRow(titleKey: "reading_progress", value: book.readingProgressText)
+                    detailRow(titleKey: "last_opened", value: book.lastOpenedText(language))
+                    detailRow(titleKey: "date_added", value: book.dateAddedText(language))
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L10n.text("file_path", language))
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+
+                Text(filePathText)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            LazyVGrid(columns: detailActionColumns, alignment: .leading, spacing: 8) {
+                if openBook != nil {
+                    detailActionButton(
+                        systemName: "book.pages",
+                        help: L10n.text("open_reader", language)
+                    ) {
+                        openSelectedBook()
+                    }
+                }
+
+                detailActionButton(
+                    systemName: "pencil",
+                    help: L10n.text("edit_book_metadata", language)
+                ) {
+                    draftTitle = book.title
+                    draftAuthor = book.author
+                    isEditingMetadata = true
+                }
+
+                detailMoveButton
+
+                detailActionButton(
+                    systemName: "photo",
+                    help: L10n.text("change_cover", language)
+                ) {
+                    isSelectingCover = true
+                }
+
+                detailActionButton(
+                    systemName: "photo.badge.arrow.down",
+                    help: L10n.text("reset_cover", language),
+                    isDisabled: book.fileURL == nil || EBookFormat(rawValue: book.fileFormat) == nil
+                ) {
+                    resetCoverFromBookFile()
+                }
+
+                detailActionButton(
+                    systemName: "folder",
+                    help: L10n.text("show_in_finder", language),
+                    isDisabled: book.fileURL == nil
+                ) {
+                    BookFileActions.revealInFinder(book)
+                }
+
+                detailActionButton(
+                    systemName: didCopyPath ? "checkmark" : "doc.on.doc",
+                    help: didCopyPath ? L10n.text("copied", language) : L10n.text("copy_file_path", language),
+                    isEmphasized: didCopyPath,
+                    isDisabled: book.fileURL == nil
+                ) {
+                    BookFileActions.copyPath(book)
+                    showCopyFeedback()
+                }
+
+                detailActionButton(
+                    systemName: book.isFavorite ? "star.slash" : "star",
+                    help: L10n.text(book.isFavorite ? "remove_from_favorites" : "add_to_favorites", language),
+                    isEmphasized: book.isFavorite
+                ) {
+                    book.isFavorite.toggle()
+                }
+
+                detailActionButton(
+                    systemName: "arrow.counterclockwise",
+                    help: L10n.text("reset_reading_progress", language),
+                    isDisabled: book.lastReadPage == 0
+                ) {
+                    book.lastReadPage = 0
+                }
+
+                detailActionButton(
+                    systemName: "trash",
+                    help: L10n.text("delete_from_shelf", language),
+                    isDestructive: true
+                ) {
+                    isConfirmingDelete = true
+                }
+            }
+            .padding(6)
+            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+        }
+        .padding(22)
+        .frame(width: 540)
+        .background(Color(red: 0.10, green: 0.12, blue: 0.12))
+        .onDisappear {
+            copyFeedbackTask?.cancel()
+        }
+        .alert(L10n.text("edit_book_metadata", language), isPresented: $isEditingMetadata) {
+            TextField(L10n.text("book_title", language), text: $draftTitle)
+            TextField(L10n.text("author", language), text: $draftAuthor)
+            Button(L10n.text("save", language)) {
+                saveMetadata()
+            }
+            Button(L10n.text("cancel", language), role: .cancel) {}
+        }
+        .fileImporter(
+            isPresented: $isSelectingCover,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: false
+        ) { result in
+            if case let .success(urls) = result, let imageURL = urls.first {
+                replaceCover(with: imageURL)
+            }
+        }
+        .confirmationDialog(
+            L10n.text("delete_confirm", language),
+            isPresented: $isConfirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button(L10n.text("delete_from_shelf", language), role: .destructive) {
+                deleteBook()
+            }
+            Button(L10n.text("cancel", language), role: .cancel) {}
+        } message: {
+            Text(book.title)
+        }
+    }
+
+    private var detailActionColumns: [GridItem] {
+        [GridItem(.adaptive(minimum: 34, maximum: 34), spacing: 8, alignment: .leading)]
+    }
+
+    private var detailMoveButton: some View {
+        Menu {
+            BookMoveMenuContent(book: book, bookcases: orderedBookcases, language: language)
+        } label: {
+            Image(systemName: "tray.and.arrow.down")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.88))
+                .frame(width: 34, height: 30)
+        }
+        .menuStyle(.borderlessButton)
+        .buttonStyle(ImmediatePlainButtonStyle())
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.white.opacity(0.08), lineWidth: 1)
+        )
+        .help(L10n.text("move_to_shelf", language))
+    }
+
+    private func detailRow(titleKey: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(L10n.text(titleKey, language))
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+        }
+    }
+
+    private func detailActionButton(
+        systemName: String,
+        help: String,
+        isEmphasized: Bool = false,
+        isDisabled: Bool = false,
+        isDestructive: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(buttonForeground(isEmphasized: isEmphasized, isDestructive: isDestructive))
+                .frame(width: 34, height: 30)
+        }
+        .buttonStyle(ImmediatePlainButtonStyle())
+        .background(.white.opacity(isEmphasized ? 0.15 : 0.08), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.white.opacity(0.08), lineWidth: 1)
+        )
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.42 : 1)
+        .help(help)
+    }
+
+    private func buttonForeground(isEmphasized: Bool, isDestructive: Bool) -> Color {
+        if isDestructive {
+            return Color.red.opacity(0.9)
+        }
+        if isEmphasized {
+            return Color.yellow
+        }
+        return Color.white.opacity(0.88)
+    }
+
+    private func showCopyFeedback() {
+        copyFeedbackTask?.cancel()
+        didCopyPath = true
+        copyFeedbackTask = Task {
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            didCopyPath = false
+        }
+    }
+
+    private func saveMetadata() {
+        let title = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let author = draftAuthor.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty {
+            book.title = title
+        }
+        book.author = author.isEmpty ? book.displayFormat : author
+    }
+
+    private func replaceCover(with sourceURL: URL) {
+        let didAccess = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let oldCoverPath = book.coverImagePath
+            if let newCoverURL = try CoverImageStore.createCustomCover(from: sourceURL, named: book.title) {
+                book.coverImagePath = newCoverURL.path
+                if let oldCoverPath, oldCoverPath != newCoverURL.path {
+                    try? FileManager.default.removeItem(atPath: oldCoverPath)
+                }
+            }
+        } catch {
+            print("Cover import failed: \(error)")
+        }
+    }
+
+    private func resetCoverFromBookFile() {
+        guard let fileURL = book.fileURL,
+              let format = EBookFormat(rawValue: book.fileFormat) else {
+            return
+        }
+
+        do {
+            let oldCoverPath = book.coverImagePath
+            if let newCoverURL = try CoverImageStore.createCover(for: fileURL, format: format) {
+                book.coverImagePath = newCoverURL.path
+                if let oldCoverPath, oldCoverPath != newCoverURL.path {
+                    try? FileManager.default.removeItem(atPath: oldCoverPath)
+                }
+            }
+        } catch {
+            print("Cover reset failed: \(error)")
+        }
+    }
+
+    private func deleteBook() {
+        BookFileStore.removeStoredFiles(for: book)
+        modelContext.delete(book)
+        dismiss()
+    }
+
+    private func openSelectedBook() {
+        guard let openBook else { return }
+        dismiss()
+        DispatchQueue.main.async {
+            openBook(book)
+        }
+    }
+
+    private func bookcaseIndex(for name: String) -> Int {
+        BookcaseSeed.required.firstIndex { $0.name == name } ?? Int.max
+    }
+}
+
 private struct BookcaseView: View {
     let bookcase: Bookcase
+    let bookcases: [Bookcase]
     let shelves: [Shelf]
     let language: SystemLanguage
     let selectedShelf: Shelf?
     let selectShelf: (Shelf) -> Void
     let importBook: (URL, Shelf) -> Void
     let deleteBook: (Book) -> Void
+    let openBook: (Book) -> Void
     let searchText: String
     let sortMode: LibrarySortMode
     let sortAscending: Bool
+    let favoritesOnly: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -607,15 +1307,18 @@ private struct BookcaseView: View {
                 ForEach(shelves) { shelf in
                     ShelfRowView(
                         shelf: shelf,
+                        bookcases: bookcases,
                         accentColor: bookcase.accentColor,
                         language: language,
                         isSelected: shelf.persistentModelID == selectedShelf?.persistentModelID,
                         selectShelf: { selectShelf(shelf) },
                         importBook: { importBook($0, shelf) },
                         deleteBook: deleteBook,
+                        openBook: openBook,
                         searchText: searchText,
                         sortMode: sortMode,
-                        sortAscending: sortAscending
+                        sortAscending: sortAscending,
+                        favoritesOnly: favoritesOnly
                     )
                 }
             }
@@ -632,15 +1335,18 @@ private struct BookcaseView: View {
 
 private struct ShelfRowView: View {
     let shelf: Shelf
+    let bookcases: [Bookcase]
     let accentColor: Color
     let language: SystemLanguage
     let isSelected: Bool
     let selectShelf: () -> Void
     let importBook: (URL) -> Void
     let deleteBook: (Book) -> Void
+    let openBook: (Book) -> Void
     let searchText: String
     let sortMode: LibrarySortMode
     let sortAscending: Bool
+    let favoritesOnly: Bool
     @State private var isImporting = false
     @State private var shelfScrollIndex = 0
 
@@ -649,10 +1355,12 @@ private struct ShelfRowView: View {
     }
 
     private var displayedBooks: [Book] {
-        let books = normalizedSearchText.isEmpty ? shelf.importedBooks : shelf.importedBooks.filter { book in
-            book.title.localizedCaseInsensitiveContains(normalizedSearchText)
+        let books = shelf.importedBooks.filter { book in
+            let matchesSearch = normalizedSearchText.isEmpty
+                || book.title.localizedCaseInsensitiveContains(normalizedSearchText)
                 || book.author.localizedCaseInsensitiveContains(normalizedSearchText)
                 || book.displayFormat.localizedCaseInsensitiveContains(normalizedSearchText)
+            return matchesSearch && (!favoritesOnly || book.isFavorite)
         }
 
         return sortMode.sort(books, ascending: sortAscending)
@@ -663,7 +1371,7 @@ private struct ShelfRowView: View {
     }
 
     private var shelfCountText: String {
-        if normalizedSearchText.isEmpty {
+        if normalizedSearchText.isEmpty && !favoritesOnly {
             return "\(shelf.importedBooks.count) \(L10n.text("books_unit", language))"
         }
 
@@ -700,7 +1408,7 @@ private struct ShelfRowView: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(alignment: .bottom, spacing: 8) {
                                 ForEach(Array(displayedBooks.enumerated()), id: \.element.persistentModelID) { index, book in
-                                    BookShelfItemView(book: book, language: language, deleteBook: { deleteBook(book) })
+                                    BookShelfItemView(book: book, bookcases: bookcases, language: language, deleteBook: { deleteBook(book) }, openBook: openBook)
                                         .id(index)
                                 }
 
@@ -810,65 +1518,86 @@ private struct BookSpineView: View {
     let book: Book
 
     var body: some View {
-        if let coverImage = book.coverImage {
-            Image(nsImage: coverImage)
-                .resizable()
-                .scaledToFill()
+        ZStack(alignment: .topTrailing) {
+            if let coverImage = book.coverImage {
+                Image(nsImage: coverImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 54, height: 82)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(.black.opacity(0.18), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.18), radius: 3, y: 2)
+            } else {
+                VStack(spacing: 5) {
+                    Image(systemName: book.formatIconName)
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+
+                    Text(book.displayFormat)
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+
+                    Text(book.title)
+                        .font(.system(size: 7, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .minimumScaleFactor(0.7)
+                }
+                .padding(5)
                 .frame(width: 54, height: 82)
-                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .background(Color.white.opacity(0.88), in: RoundedRectangle(cornerRadius: 5))
                 .overlay(
                     RoundedRectangle(cornerRadius: 5)
-                        .stroke(.black.opacity(0.18), lineWidth: 1)
+                        .stroke(.black.opacity(0.16), lineWidth: 1)
                 )
-                .shadow(color: .black.opacity(0.18), radius: 3, y: 2)
-        } else {
-            VStack(spacing: 5) {
-                Image(systemName: book.formatIconName)
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-
-                Text(book.displayFormat)
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
-
-                Text(book.title)
-                    .font(.system(size: 7, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                    .minimumScaleFactor(0.7)
+                .shadow(color: .black.opacity(0.14), radius: 3, y: 2)
             }
-            .padding(5)
-            .frame(width: 54, height: 82)
-            .background(Color.white.opacity(0.88), in: RoundedRectangle(cornerRadius: 5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 5)
-                    .stroke(.black.opacity(0.16), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.14), radius: 3, y: 2)
+
+            if book.isFavorite {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.yellow)
+                    .padding(4)
+                    .background(.black.opacity(0.62), in: Circle())
+                    .offset(x: 5, y: -5)
+            }
         }
+        .frame(width: 54, height: 82)
     }
 }
 
 private struct BookShelfItemView: View {
     let book: Book
+    let bookcases: [Bookcase]
     let language: SystemLanguage
     let deleteBook: () -> Void
+    let openBook: (Book) -> Void
     @State private var isConfirmingDelete = false
     @State private var isRenaming = false
+    @State private var isShowingDetails = false
     @State private var draftTitle = ""
 
     var body: some View {
-        NavigationLink {
-            BookReaderView(book: book, language: language)
+        Button {
+            openBook(book)
         } label: {
             BookSpineView(book: book)
         }
         .buttonStyle(ImmediatePlainButtonStyle())
         .contextMenu {
-            BookFileContextActions(book: book, language: language)
+            BookFileContextActions(book: book, language: language) {
+                isShowingDetails = true
+            }
 
             Divider()
+
+            BookFavoriteContextAction(book: book, language: language)
+
+            BookMoveContextActions(book: book, bookcases: bookcases, language: language)
 
             Button {
                 draftTitle = book.title
@@ -913,6 +1642,9 @@ private struct BookShelfItemView: View {
                 saveTitle()
             }
             Button(L10n.text("cancel", language), role: .cancel) {}
+        }
+        .sheet(isPresented: $isShowingDetails) {
+            BookDetailsView(book: book, language: language, openBook: openBook)
         }
     }
 
@@ -971,6 +1703,7 @@ private struct AddBookCoverButton: View {
 private struct BookReaderView: View {
     let book: Book
     let language: SystemLanguage
+    var closeReader: (() -> Void)? = nil
     @State private var selectedText = ""
     @State private var sourceText = ""
     @State private var translatedText = ""
@@ -994,8 +1727,12 @@ private struct BookReaderView: View {
     @State private var didCopySelection = false
     @State private var copyFeedbackTask: Task<Void, Never>?
     @State private var isReadingSettingsPresented = false
+    @State private var isBookDetailsPresented = false
     @State private var readerTheme: ReaderTheme = .dark
     @State private var readerContentWidth = 800.0
+    @State private var isReaderToolbarVisible = true
+    @State private var isReaderSearchVisible = false
+    @State private var readerToolbarHideTask: Task<Void, Never>?
     @FocusState private var focusedReaderField: ReaderFocusField?
     @Environment(\.dismiss) private var dismiss
 
@@ -1012,66 +1749,45 @@ private struct BookReaderView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if supportsReaderToolbar {
-                readerToolbar
-                Divider()
-            }
+        ZStack(alignment: .top) {
+            readerContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(readerTheme.backgroundColor)
 
-            Group {
-                if let url = book.fileURL, let format {
-                    switch format {
-                    case .pdf:
-                        PDFReaderView(
-                            url: url,
-                            selectedText: $selectedText,
-                            pageIndex: $readerPageIndex,
-                            pageCount: $readerPageCount,
-                            zoomScale: $readerZoomScale,
-                            searchText: $readerSearchText,
-                            searchStatus: $readerSearchStatus,
-                            command: $readerCommand,
-                            tocItems: $readerTOCItems,
-                            readingTheme: readerTheme,
-                            onTranslate: startTranslation
-                        )
-                    case .cbz:
-                        CBZReaderView(
-                            url: url,
-                            language: language,
-                            pageIndex: $readerPageIndex,
-                            pageCount: $readerPageCount,
-                            zoomScale: $readerZoomScale,
-                            readingTheme: readerTheme,
-                            command: $readerCommand
-                        )
-                    case .epub:
-                        EPUBReaderView(
-                            url: url,
-                            language: language,
-                            selectedText: $selectedText,
-                            pageIndex: $readerPageIndex,
-                            pageCount: $readerPageCount,
-                            zoomScale: $readerZoomScale,
-                            searchText: $readerSearchText,
-                            searchStatus: $readerSearchStatus,
-                            command: $readerCommand,
-                            tocItems: $readerTOCItems,
-                            readingTheme: readerTheme,
-                            contentWidth: readerContentWidth,
-                            onTranslate: startTranslation
-                        )
-                    }
-                } else {
-                    ContentUnavailableView(
-                        L10n.text("no_file_title", language),
-                        systemImage: "book.closed",
-                        description: Text(L10n.text("no_file_description", language))
-                    )
-                }
+            if supportsReaderToolbar {
+                readerPageEdgeControls
+                    .zIndex(2)
             }
         }
-        .navigationTitle(book.title)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if supportsReaderToolbar && isReaderToolbarVisible {
+                readerToolbar
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .onContinuousHover { phase in
+            guard supportsReaderToolbar else { return }
+            handleReaderHover(phase)
+        }
+        .onExitCommand {
+            closeReader?() ?? dismiss()
+        }
+        .background(
+            ReaderKeyboardHandler { key in
+                switch key {
+                case .left:
+                    guard readerPageIndex > 0 else { return }
+                    showReaderToolbar()
+                    sendReaderCommand(.previousPage)
+                case .right:
+                    guard readerPageCount > 0, readerPageIndex < readerPageCount - 1 else { return }
+                    showReaderToolbar()
+                    sendReaderCommand(.nextPage)
+                }
+            }
+        )
+        .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
+        .background(readerTheme.backgroundColor)
         .translationTask(translationConfiguration) { session in
             await translateSelection(using: session)
         }
@@ -1091,7 +1807,10 @@ private struct BookReaderView: View {
         .onChange(of: readerContentWidth) { _, _ in
             saveReaderAppearance()
         }
-        .onChange(of: readerPageCount) { _, _ in
+        .onChange(of: readerPageCount) { _, newValue in
+            if newValue > 0 {
+                book.lastPageCount = newValue
+            }
             syncReaderPageInput()
         }
         .onChange(of: readerSearchText) { _, newValue in
@@ -1103,16 +1822,23 @@ private struct BookReaderView: View {
             saveBookmarks()
         }
         .onAppear {
+            book.lastOpenedAt = Date()
             readerPageIndex = max(book.lastReadPage, 0)
             loadZoomScale()
             loadReaderAppearance()
             readerTOCItems = []
             loadBookmarks()
+            if readerPageCount > 0 {
+                book.lastPageCount = readerPageCount
+            }
             syncReaderPageInput()
+            showReaderToolbar()
+            scheduleReaderToolbarHide(after: 1.8)
         }
         .onDisappear {
             autoTranslationTask?.cancel()
             copyFeedbackTask?.cancel()
+            readerToolbarHideTask?.cancel()
         }
         .sheet(isPresented: $isTranslationPresented) {
             TranslationResultView(
@@ -1124,216 +1850,257 @@ private struct BookReaderView: View {
                 isTranslating: isTranslating
             )
         }
+        .sheet(isPresented: $isBookDetailsPresented) {
+            BookDetailsView(book: book, language: language, openBook: nil)
+        }
     }
 
-    private var readerToolbar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-        HStack(spacing: 10) {
-            readerIconButton("chevron.left", help: "Back") {
-                dismiss()
-            }
-            .keyboardShortcut(.escape, modifiers: [])
-
-            readerIconButton("list.bullet", help: "Table of contents") {
-                isTOCPresented.toggle()
-            }
-            .popover(isPresented: $isTOCPresented, arrowEdge: .bottom) {
-                ReaderTOCView(
-                    pageCount: readerPageCount,
-                    currentPageIndex: readerPageIndex,
-                    items: readerTOCItems,
-                    language: language
-                ) { page in
-                    readerPageIndex = page
-                    sendReaderCommand(.goToPage(page))
-                    isTOCPresented = false
+    private var readerContent: some View {
+        Group {
+            if let url = book.fileURL, let format {
+                switch format {
+                case .pdf:
+                    PDFReaderView(
+                        url: url,
+                        selectedText: $selectedText,
+                        pageIndex: $readerPageIndex,
+                        pageCount: $readerPageCount,
+                        zoomScale: $readerZoomScale,
+                        searchText: $readerSearchText,
+                        searchStatus: $readerSearchStatus,
+                        command: $readerCommand,
+                        tocItems: $readerTOCItems,
+                        readingTheme: readerTheme,
+                        onTranslate: startTranslation
+                    )
+                case .cbz:
+                    CBZReaderView(
+                        url: url,
+                        language: language,
+                        pageIndex: $readerPageIndex,
+                        pageCount: $readerPageCount,
+                        zoomScale: $readerZoomScale,
+                        readingTheme: readerTheme,
+                        command: $readerCommand
+                    )
+                case .epub:
+                    EPUBReaderView(
+                        url: url,
+                        language: language,
+                        selectedText: $selectedText,
+                        pageIndex: $readerPageIndex,
+                        pageCount: $readerPageCount,
+                        zoomScale: $readerZoomScale,
+                        searchText: $readerSearchText,
+                        searchStatus: $readerSearchStatus,
+                        command: $readerCommand,
+                        tocItems: $readerTOCItems,
+                        readingTheme: readerTheme,
+                        contentWidth: readerContentWidth,
+                        onTranslate: startTranslation
+                    )
                 }
-                .frame(width: 260, height: 360)
+            } else {
+                ContentUnavailableView(
+                    L10n.text("no_file_title", language),
+                    systemImage: "book.closed",
+                    description: Text(L10n.text("no_file_description", language))
+                )
             }
+        }
+    }
 
-            Divider().frame(height: 24)
-
-            readerIconButton("chevron.left", help: L10n.text("previous", language)) {
+    private var readerPageEdgeControls: some View {
+        HStack {
+            readerPageEdgeButton("chevron.left", help: L10n.text("previous", language)) {
+                showReaderToolbar()
                 sendReaderCommand(.previousPage)
             }
             .disabled(readerPageIndex <= 0)
-            .keyboardShortcut(.leftArrow, modifiers: [.command])
-
-            Text(readerPageCount > 0 ? "\(readerPageIndex + 1) / \(readerPageCount)" : "- / -")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 78)
-
-            Text(readingProgressText)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 48)
-
-            HStack(spacing: 5) {
-                TextField("", text: $readerPageInput)
-                    .textFieldStyle(.plain)
-                    .multilineTextAlignment(.center)
-                    .frame(width: 42)
-                    .onSubmit(goToTypedPage)
-
-                Text("/")
-                    .foregroundStyle(.secondary)
-
-                Text("\(max(readerPageCount, 0))")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34, alignment: .leading)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-            .disabled(readerPageCount <= 0)
-
-            readerIconButton("chevron.right", help: L10n.text("next", language)) {
-                sendReaderCommand(.nextPage)
-            }
-            .disabled(readerPageCount == 0 || readerPageIndex >= readerPageCount - 1)
-            .keyboardShortcut(.rightArrow, modifiers: [.command])
-
-            if readerPageCount > 1 {
-                Slider(
-                    value: Binding(
-                        get: { Double(min(readerPageIndex + 1, readerPageCount)) },
-                        set: { value in
-                            let page = min(max(Int(value.rounded()) - 1, 0), readerPageCount - 1)
-                            guard page != readerPageIndex else { return }
-                            readerPageIndex = page
-                            sendReaderCommand(.goToPage(page))
-                        }
-                    ),
-                    in: 1...Double(readerPageCount),
-                    step: 1
-                )
-                .frame(width: 130)
-            } else {
-                Capsule()
-                    .fill(.secondary.opacity(0.14))
-                    .frame(width: 130, height: 6)
-            }
-
-            Divider().frame(height: 24)
-
-            HStack(spacing: 6) {
-                readerIconButton("magnifyingglass", help: L10n.text("search", language)) {
-                    focusedReaderField = .search
-                }
-                .keyboardShortcut("f", modifiers: [.command])
-
-                TextField(L10n.text("search", language), text: $readerSearchText)
-                    .textFieldStyle(.plain)
-                    .frame(width: 160)
-                    .focused($focusedReaderField, equals: .search)
-                    .onSubmit {
-                        sendReaderCommand(.search)
-                    }
-                if !readerSearchText.isEmpty {
-                    readerIconButton("chevron.up", help: L10n.text("find_previous", language)) {
-                        sendReaderCommand(.previousSearchResult)
-                    }
-
-                    readerIconButton("chevron.down", help: L10n.text("find_next", language)) {
-                        sendReaderCommand(.nextSearchResult)
-                    }
-
-                    readerIconButton("xmark.circle.fill", help: L10n.text("clear_search", language)) {
-                        readerSearchText = ""
-                        readerSearchStatus = nil
-                        sendReaderCommand(.clearSearch)
-                    }
-                }
-                if let readerSearchStatus {
-                    Text(readerSearchStatus)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-            .disabled(!supportsTextTools)
-            .help(supportsTextTools ? L10n.text("search", language) : L10n.text("text_tools_unavailable", language))
-
-            Divider().frame(height: 24)
-
-            readerIconButton("textformat.size.smaller", help: L10n.text("zoom_out", language)) {
-                readerZoomScale = max(0.8, readerZoomScale - 0.1)
-                sendReaderCommand(.setZoom(readerZoomScale))
-            }
-            .keyboardShortcut("-", modifiers: [.command])
-
-            readerIconButton("textformat.size.larger", help: L10n.text("zoom_in", language)) {
-                readerZoomScale = min(1.8, readerZoomScale + 0.1)
-                sendReaderCommand(.setZoom(readerZoomScale))
-            }
-            .keyboardShortcut("=", modifiers: [.command])
-
-            Text("\(Int(readerZoomScale * 100))%")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 42)
-
-            readerIconButton("arrow.counterclockwise", help: L10n.text("reset_zoom", language)) {
-                readerZoomScale = 1.0
-                sendReaderCommand(.setZoom(readerZoomScale))
-            }
-            .keyboardShortcut("0", modifiers: [.command])
-
-            Divider().frame(height: 24)
-
-            readerIconButton("textformat", help: L10n.text("reading_settings", language)) {
-                isReadingSettingsPresented.toggle()
-            }
-            .popover(isPresented: $isReadingSettingsPresented, arrowEdge: .bottom) {
-                ReaderSettingsView(
-                    language: language,
-                    theme: $readerTheme,
-                    contentWidth: $readerContentWidth
-                )
-                .frame(width: 300)
-            }
-
-            Divider().frame(height: 24)
-
-            readerIconButton(bookmarkedPages.contains(readerPageIndex) ? "bookmark.fill" : "bookmark", help: L10n.text("bookmark", language)) {
-                if bookmarkedPages.contains(readerPageIndex) {
-                    bookmarkedPages.remove(readerPageIndex)
-                } else {
-                    bookmarkedPages.insert(readerPageIndex)
-                }
-                book.lastReadPage = readerPageIndex
-            }
-            .keyboardShortcut("d", modifiers: [.command])
-
-            readerIconButton("bookmark.square", help: L10n.text("bookmarks", language)) {
-                isBookmarksPresented.toggle()
-            }
-            .popover(isPresented: $isBookmarksPresented, arrowEdge: .bottom) {
-                ReaderBookmarksView(
-                    bookmarkedPages: bookmarkedPages,
-                    currentPageIndex: readerPageIndex,
-                    tocItems: readerTOCItems,
-                    language: language
-                ) { page in
-                    readerPageIndex = page
-                    sendReaderCommand(.goToPage(page))
-                    isBookmarksPresented = false
-                }
-                .frame(width: 240, height: 300)
-            }
 
             Spacer()
 
-            readerIconButton(didCopySelection ? "checkmark" : "doc.on.doc", help: L10n.text("copy_selection", language)) {
+            readerPageEdgeButton("chevron.right", help: L10n.text("next", language)) {
+                showReaderToolbar()
+                sendReaderCommand(.nextPage)
+            }
+            .disabled(readerPageCount == 0 || readerPageIndex >= readerPageCount - 1)
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var readerToolbar: some View {
+        ZStack {
+            Text(book.title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+                .frame(maxWidth: 360)
+                .allowsHitTesting(false)
+
+            HStack(spacing: 10) {
+                readerIconButton("chevron.left", help: "Back") {
+                    closeReader?() ?? dismiss()
+                }
+                .keyboardShortcut(.escape, modifiers: [])
+
+                readerIconButton("chevron.left", help: L10n.text("previous", language)) {
+                    sendReaderCommand(.previousPage)
+                }
+                .disabled(readerPageIndex <= 0)
+                .keyboardShortcut(.leftArrow, modifiers: [.command])
+
+                Text(readerPageCount > 0 ? "\(readerPageIndex + 1) / \(readerPageCount)" : "- / -")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .frame(width: 72)
+
+                readerIconButton("chevron.right", help: L10n.text("next", language)) {
+                    sendReaderCommand(.nextPage)
+                }
+                .disabled(readerPageCount == 0 || readerPageIndex >= readerPageCount - 1)
+                .keyboardShortcut(.rightArrow, modifiers: [.command])
+
+                Spacer(minLength: 18)
+
+                readerIconButton("magnifyingglass", help: L10n.text("search", language)) {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        isReaderSearchVisible.toggle()
+                    }
+                    if isReaderSearchVisible {
+                        focusedReaderField = .search
+                    }
+                }
+                .disabled(!supportsTextTools)
+                .keyboardShortcut("f", modifiers: [.command])
+                .popover(isPresented: $isReaderSearchVisible, arrowEdge: .bottom) {
+                    readerSearchControl
+                        .padding(12)
+                        .frame(width: 320)
+                }
+
+                readerIconButton("textformat.size.smaller", help: L10n.text("zoom_out", language)) {
+                    readerZoomScale = max(0.8, readerZoomScale - 0.1)
+                    sendReaderCommand(.setZoom(readerZoomScale))
+                }
+                .keyboardShortcut("-", modifiers: [.command])
+
+                readerIconButton("textformat.size.larger", help: L10n.text("zoom_in", language)) {
+                    readerZoomScale = min(1.8, readerZoomScale + 0.1)
+                    sendReaderCommand(.setZoom(readerZoomScale))
+                }
+                .keyboardShortcut("=", modifiers: [.command])
+
+                readerIconButton("textformat", help: L10n.text("reading_settings", language)) {
+                    isReadingSettingsPresented.toggle()
+                }
+                .popover(isPresented: $isReadingSettingsPresented, arrowEdge: .bottom) {
+                    ReaderSettingsView(
+                        language: language,
+                        theme: $readerTheme,
+                        contentWidth: $readerContentWidth
+                    )
+                    .frame(width: 300)
+                }
+
+                readerMoreMenu
+            }
+        }
+        .frame(height: 52)
+        .padding(.horizontal, 14)
+        .foregroundStyle(.white)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(.white.opacity(0.08))
+                .frame(height: 1)
+        }
+        .onHover { hovering in
+            if hovering {
+                showReaderToolbar()
+            } else {
+                scheduleReaderToolbarHide(after: 0.85)
+            }
+        }
+    }
+
+    private var readerSearchControl: some View {
+        HStack(spacing: 6) {
+            TextField(L10n.text("search", language), text: $readerSearchText)
+                .textFieldStyle(.plain)
+                .frame(width: 180)
+                .focused($focusedReaderField, equals: .search)
+                .onSubmit {
+                    sendReaderCommand(.search)
+                }
+
+            if !readerSearchText.isEmpty {
+                readerIconButton("chevron.up", help: L10n.text("find_previous", language)) {
+                    sendReaderCommand(.previousSearchResult)
+                }
+
+                readerIconButton("chevron.down", help: L10n.text("find_next", language)) {
+                    sendReaderCommand(.nextSearchResult)
+                }
+
+                readerIconButton("xmark.circle.fill", help: L10n.text("clear_search", language)) {
+                    readerSearchText = ""
+                    readerSearchStatus = nil
+                    sendReaderCommand(.clearSearch)
+                }
+            }
+
+            if let readerSearchStatus {
+                Text(readerSearchStatus)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .help(supportsTextTools ? L10n.text("search", language) : L10n.text("text_tools_unavailable", language))
+    }
+
+    private var readerMoreMenu: some View {
+        Menu {
+            Button {
+                isTOCPresented.toggle()
+            } label: {
+                Label(L10n.text("table_of_contents", language), systemImage: "list.bullet")
+            }
+
+            Button {
+                isBookmarksPresented.toggle()
+            } label: {
+                Label(L10n.text("bookmarks", language), systemImage: "bookmark.square")
+            }
+
+            Button {
+                isBookDetailsPresented = true
+            } label: {
+                Label(L10n.text("book_details", language), systemImage: "info.circle")
+            }
+
+            Button {
+                book.isFavorite.toggle()
+            } label: {
+                Label(
+                    L10n.text(book.isFavorite ? "remove_from_favorites" : "add_to_favorites", language),
+                    systemImage: book.isFavorite ? "star.slash" : "star"
+                )
+            }
+
+            Divider()
+
+            Button {
                 copySelectedText()
+            } label: {
+                Label(L10n.text("copy_selection", language), systemImage: didCopySelection ? "checkmark" : "doc.on.doc")
             }
             .disabled(selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .keyboardShortcut("c", modifiers: [.command, .shift])
 
             Button {
                 startTranslation()
@@ -1341,16 +2108,57 @@ private struct BookReaderView: View {
                 Label(L10n.text("translate_selection", language), systemImage: "character.bubble")
             }
             .disabled(!supportsTextTools || selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .buttonStyle(ImmediatePlainButtonStyle())
-            .keyboardShortcut("t", modifiers: [.command])
-            .help(supportsTextTools ? L10n.text("translate_selection", language) : L10n.text("text_tools_unavailable", language))
+
+            Divider()
+
+            Button {
+                readerZoomScale = 1.0
+                sendReaderCommand(.setZoom(readerZoomScale))
+            } label: {
+                Label(L10n.text("reset_zoom", language), systemImage: "arrow.counterclockwise")
+            }
+
+            Button {
+                goToTypedPage()
+            } label: {
+                Label("\(L10n.text("page", language)) \(readerPageInput)", systemImage: "number")
+            }
+            .disabled(readerPageCount <= 0)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
         }
-        .frame(minWidth: 980, alignment: .leading)
+        .menuStyle(.borderlessButton)
+        .buttonStyle(ImmediatePlainButtonStyle())
+        .popover(isPresented: $isTOCPresented, arrowEdge: .bottom) {
+            ReaderTOCView(
+                pageCount: readerPageCount,
+                currentPageIndex: readerPageIndex,
+                items: readerTOCItems,
+                language: language
+            ) { page in
+                readerPageIndex = page
+                sendReaderCommand(.goToPage(page))
+                isTOCPresented = false
+            }
+            .frame(width: 260, height: 360)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .foregroundStyle(.white)
-        .background(Color(red: 0.10, green: 0.13, blue: 0.14))
+        .popover(isPresented: $isBookmarksPresented, arrowEdge: .bottom) {
+            ReaderBookmarksView(
+                bookmarkedPages: bookmarkedPages,
+                currentPageIndex: readerPageIndex,
+                tocItems: readerTOCItems,
+                language: language
+            ) { page in
+                readerPageIndex = page
+                sendReaderCommand(.goToPage(page))
+                isBookmarksPresented = false
+            }
+            .frame(width: 240, height: 300)
+        }
+        .help(L10n.text("more", language))
     }
 
     private func readerIconButton(_ systemName: String, help: String, action: @escaping () -> Void) -> some View {
@@ -1364,8 +2172,55 @@ private struct BookReaderView: View {
         .help(help)
     }
 
+    private func readerPageEdgeButton(_ systemName: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.90))
+                .frame(width: 54, height: 88)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ImmediatePlainButtonStyle())
+        .background(.black.opacity(0.001))
+        .help(help)
+    }
+
+    private func handleReaderHover(_ phase: HoverPhase) {
+        switch phase {
+        case .active(let location):
+            if location.y <= 92 {
+                showReaderToolbar()
+            } else if location.y > 132 {
+                scheduleReaderToolbarHide(after: 0.65)
+            }
+        case .ended:
+            scheduleReaderToolbarHide(after: 0.65)
+        }
+    }
+
     private func sendReaderCommand(_ kind: ReaderCommand.Kind) {
         readerCommand = ReaderCommand(kind: kind)
+    }
+
+    private func showReaderToolbar() {
+        readerToolbarHideTask?.cancel()
+        withAnimation(.easeOut(duration: 0.18)) {
+            isReaderToolbarVisible = true
+        }
+    }
+
+    private func scheduleReaderToolbarHide(after seconds: Double) {
+        readerToolbarHideTask?.cancel()
+        readerToolbarHideTask = Task {
+            let nanoseconds = UInt64(max(seconds, 0) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    isReaderToolbarVisible = false
+                }
+            }
+        }
     }
 
     private var bookmarkStorageKey: String {
@@ -1404,6 +2259,15 @@ private struct BookReaderView: View {
         readerPageIndex = page
         sendReaderCommand(.goToPage(page))
         syncReaderPageInput()
+    }
+
+    private func toggleBookmark() {
+        if bookmarkedPages.contains(readerPageIndex) {
+            bookmarkedPages.remove(readerPageIndex)
+        } else {
+            bookmarkedPages.insert(readerPageIndex)
+        }
+        book.lastReadPage = readerPageIndex
     }
 
     private func copySelectedText() {
@@ -2958,6 +3822,51 @@ private enum SystemLanguage: String, CaseIterable, Identifiable {
             return Locale.Language(languageCode: "vi")
         }
     }
+
+    var locale: Locale {
+        switch self {
+        case .en:
+            return Locale(identifier: "en_US")
+        case .th:
+            return Locale(identifier: "th_TH")
+        case .cn:
+            return Locale(identifier: "zh_Hans_CN")
+        case .zhTW:
+            return Locale(identifier: "zh_Hant_TW")
+        case .it:
+            return Locale(identifier: "it_IT")
+        case .jp:
+            return Locale(identifier: "ja_JP")
+        case .ar:
+            return Locale(identifier: "ar")
+        case .nl:
+            return Locale(identifier: "nl_NL")
+        case .fr:
+            return Locale(identifier: "fr_FR")
+        case .de:
+            return Locale(identifier: "de_DE")
+        case .hi:
+            return Locale(identifier: "hi_IN")
+        case .id:
+            return Locale(identifier: "id_ID")
+        case .ko:
+            return Locale(identifier: "ko_KR")
+        case .pl:
+            return Locale(identifier: "pl_PL")
+        case .pt:
+            return Locale(identifier: "pt_PT")
+        case .ru:
+            return Locale(identifier: "ru_RU")
+        case .es:
+            return Locale(identifier: "es_ES")
+        case .tr:
+            return Locale(identifier: "tr_TR")
+        case .uk:
+            return Locale(identifier: "uk_UA")
+        case .vi:
+            return Locale(identifier: "vi_VN")
+        }
+    }
 }
 
 private enum L10n {
@@ -2986,6 +3895,11 @@ private enum L10n {
         }
     }
 
+    static func duplicateImportMessage(bookTitle: String, _ language: SystemLanguage) -> String {
+        let template = text("duplicate_import_message", language)
+        return template.replacingOccurrences(of: "%@", with: bookTitle)
+    }
+
     private static let translations: [String: [SystemLanguage: String]] = [
         "app_subtitle": [
             .en: "An eBook bookshelf organized like a personal library.",
@@ -3009,16 +3923,107 @@ private enum L10n {
             .uk: "Полиця eBook, упорядкована як особиста бібліотека.",
             .vi: "Tủ eBook được sắp xếp như thư viện cá nhân."
         ],
+        "ebook_store": [
+            .en: "eBook Store",
+            .th: "ร้าน eBook",
+            .cn: "电子书商店",
+            .zhTW: "電子書商店",
+            .it: "Negozio eBook",
+            .jp: "eBook ストア",
+            .ar: "متجر الكتب الإلكترونية",
+            .nl: "eBook-winkel",
+            .fr: "Boutique eBook",
+            .de: "eBook-Store",
+            .hi: "eBook स्टोर",
+            .id: "Toko eBook",
+            .ko: "eBook 스토어",
+            .pl: "Sklep eBook",
+            .pt: "Loja de eBooks",
+            .ru: "Магазин eBook",
+            .es: "Tienda eBook",
+            .tr: "eBook Mağazası",
+            .uk: "Магазин eBook",
+            .vi: "Cửa hàng eBook"
+        ],
+        "favorite_books": [
+            .en: "Favorite Books",
+            .th: "หนังสือโปรด",
+            .cn: "收藏书籍",
+            .zhTW: "收藏書籍",
+            .it: "Libri preferiti",
+            .jp: "お気に入りの本",
+            .ar: "الكتب المفضلة",
+            .nl: "Favoriete boeken",
+            .fr: "Livres favoris",
+            .de: "Lieblingsbücher",
+            .hi: "पसंदीदा पुस्तकें",
+            .id: "Buku Favorit",
+            .ko: "즐겨찾는 책",
+            .pl: "Ulubione książki",
+            .pt: "Livros favoritos",
+            .ru: "Избранные книги",
+            .es: "Libros favoritos",
+            .tr: "Favori Kitaplar",
+            .uk: "Улюблені книги",
+            .vi: "Sách yêu thích"
+        ],
+        "ebook_store_description": [
+            .en: "A future place to browse, download, and add books to your Codex Shelf.",
+            .th: "พื้นที่สำหรับค้นหา ดาวน์โหลด และเพิ่มหนังสือเข้า Codex Shelf ในอนาคต",
+            .cn: "未来可浏览、下载并添加书籍到 Codex Shelf 的地方。",
+            .it: "Uno spazio futuro per cercare, scaricare e aggiungere libri a Codex Shelf.",
+            .jp: "将来、Codex Shelf に本を探して追加するための場所です。"
+        ],
+        "ebook_store_coming_soon": [
+            .en: "Store view is ready for the next phase",
+            .th: "หน้า Store พร้อมสำหรับพัฒนาต่อในเฟสถัดไป",
+            .cn: "商店页面已准备好进入下一阶段",
+            .it: "La vista Store è pronta per la prossima fase",
+            .jp: "ストア画面は次の段階に進めます"
+        ],
+        "ebook_store_note": [
+            .en: "Online catalog, recommendations, and download sources can be connected here later.",
+            .th: "ภายหลังสามารถต่อ catalog ออนไลน์ ระบบแนะนำหนังสือ และแหล่งดาวน์โหลดได้จากหน้านี้",
+            .cn: "之后可在这里连接在线目录、推荐和下载来源。",
+            .it: "In seguito potrai collegare cataloghi online, consigli e fonti di download.",
+            .jp: "後でオンラインカタログ、推薦、ダウンロード元をここに接続できます。"
+        ],
         "shelves_unit": [.en: "shelves", .th: "ชั้น", .cn: "层", .it: "ripiani", .jp: "段"],
         "books_unit": [.en: "books", .th: "เล่ม", .cn: "本", .it: "libri", .jp: "冊"],
         "add": [.en: "Add", .th: "เพิ่ม", .cn: "添加", .it: "Aggiungi", .jp: "追加"],
+        "ok": [.en: "OK", .th: "ตกลง", .cn: "确定", .it: "OK", .jp: "OK"],
         "save": [.en: "Save", .th: "บันทึก", .cn: "保存", .it: "Salva", .jp: "保存"],
+        "yes": [.en: "Yes", .th: "ใช่", .cn: "是", .it: "Sì", .jp: "はい"],
+        "no": [.en: "No", .th: "ไม่ใช่", .cn: "否", .it: "No", .jp: "いいえ"],
+        "import_notice": [.en: "Import notice", .th: "แจ้งเตือนการนำเข้า", .cn: "导入提示", .it: "Avviso importazione", .jp: "読み込み通知"],
+        "duplicate_import_message": [.en: "\"%@\" is already in your library.", .th: "มี \"%@\" อยู่ในห้องสมุดแล้ว", .cn: "“%@” 已在您的书库中。", .it: "\"%@\" è già nella libreria.", .jp: "「%@」はすでにライブラリにあります。"],
         "delete_from_shelf": [.en: "Remove from shelf", .th: "ลบออกจากชั้น", .cn: "从书架移除", .it: "Rimuovi dallo scaffale", .jp: "棚から削除"],
+        "open_reader": [.en: "Open reader", .th: "เปิดอ่าน", .cn: "打开阅读器", .it: "Apri lettore", .jp: "リーダーで開く"],
         "rename_book": [.en: "Rename book", .th: "เปลี่ยนชื่อหนังสือ", .cn: "重命名书籍", .it: "Rinomina libro", .jp: "本の名前を変更"],
+        "move_to_shelf": [.en: "Move to shelf", .th: "ย้ายไปชั้น", .cn: "移动到书架", .it: "Sposta nello scaffale", .jp: "棚へ移動"],
+        "add_to_favorites": [.en: "Add to favorites", .th: "เพิ่มในรายการโปรด", .cn: "加入收藏", .it: "Aggiungi ai preferiti", .jp: "お気に入りに追加"],
+        "remove_from_favorites": [.en: "Remove from favorites", .th: "ลบออกจากรายการโปรด", .cn: "取消收藏", .it: "Rimuovi dai preferiti", .jp: "お気に入りから削除"],
+        "favorites_only": [.en: "Favorites only", .th: "เฉพาะรายการโปรด", .cn: "仅收藏", .it: "Solo preferiti", .jp: "お気に入りのみ"],
+        "book_details": [.en: "Book details", .th: "รายละเอียดหนังสือ", .cn: "书籍详情", .it: "Dettagli libro", .jp: "本の詳細"],
+        "edit_book_metadata": [.en: "Edit book info", .th: "แก้ไขข้อมูลหนังสือ", .cn: "编辑书籍信息", .it: "Modifica info libro", .jp: "本の情報を編集"],
+        "change_cover": [.en: "Change cover", .th: "เปลี่ยนปก", .cn: "更换封面", .it: "Cambia copertina", .jp: "表紙を変更"],
+        "reset_cover": [.en: "Reset cover from book file", .th: "รีเซ็ตปกจากไฟล์หนังสือ", .cn: "从书籍文件重置封面", .it: "Reimposta copertina dal file", .jp: "本のファイルから表紙をリセット"],
         "book_title": [.en: "Book title", .th: "ชื่อหนังสือ", .cn: "书名", .it: "Titolo del libro", .jp: "本のタイトル"],
+        "author": [.en: "Author", .th: "ผู้แต่ง", .cn: "作者", .it: "Autore", .jp: "著者"],
+        "format": [.en: "Format", .th: "ฟอร์แมต", .cn: "格式", .it: "Formato", .jp: "形式"],
+        "current_shelf": [.en: "Current shelf", .th: "ชั้นปัจจุบัน", .cn: "当前书架", .it: "Scaffale corrente", .jp: "現在の棚"],
+        "file_size": [.en: "File size", .th: "ขนาดไฟล์", .cn: "文件大小", .it: "Dimensione file", .jp: "ファイルサイズ"],
+        "file_path": [.en: "File path", .th: "ตำแหน่งไฟล์", .cn: "文件路径", .it: "Percorso file", .jp: "ファイルパス"],
+        "favorite_status": [.en: "Favorite", .th: "รายการโปรด", .cn: "收藏", .it: "Preferito", .jp: "お気に入り"],
+        "last_read_page": [.en: "Last read page", .th: "หน้าที่อ่านล่าสุด", .cn: "上次阅读页", .it: "Ultima pagina letta", .jp: "最後に読んだページ"],
+        "reading_progress": [.en: "Reading progress", .th: "ความคืบหน้าการอ่าน", .cn: "阅读进度", .it: "Avanzamento lettura", .jp: "読書の進捗"],
+        "last_opened": [.en: "Last opened", .th: "เปิดอ่านล่าสุด", .cn: "上次打开", .it: "Ultima apertura", .jp: "最後に開いた日時"],
+        "date_added": [.en: "Date added", .th: "วันที่เพิ่ม", .cn: "添加日期", .it: "Data aggiunta", .jp: "追加日"],
+        "never": [.en: "Never", .th: "ยังไม่เคย", .cn: "从未", .it: "Mai", .jp: "未使用"],
         "reset_reading_progress": [.en: "Reset reading progress", .th: "รีเซ็ตความคืบหน้าการอ่าน", .cn: "重置阅读进度", .it: "Reimposta avanzamento", .jp: "読書進捗をリセット"],
         "show_in_finder": [.en: "Show in Finder", .th: "แสดงใน Finder", .cn: "在 Finder 中显示", .it: "Mostra nel Finder", .jp: "Finder に表示"],
         "copy_file_path": [.en: "Copy file path", .th: "คัดลอก path ไฟล์", .cn: "复制文件路径", .it: "Copia percorso file", .jp: "ファイルパスをコピー"],
+        "copied": [.en: "Copied", .th: "คัดลอกแล้ว", .cn: "已复制", .it: "Copiato", .jp: "コピー済み"],
         "delete_confirm": [.en: "Remove this book from the shelf?", .th: "ลบหนังสือเล่มนี้ออกจากชั้น?", .cn: "要从书架移除这本书吗？", .it: "Rimuovere questo libro dallo scaffale?", .jp: "この本を棚から削除しますか？"],
         "cancel": [.en: "Cancel", .th: "ยกเลิก", .cn: "取消", .it: "Annulla", .jp: "キャンセル"],
         "no_file_title": [.en: "No book file", .th: "ยังไม่มีไฟล์หนังสือ", .cn: "没有书籍文件", .it: "Nessun file libro", .jp: "本のファイルがありません"],
@@ -3028,7 +4033,10 @@ private enum L10n {
         "sort_by": [.en: "Sort by", .th: "เรียงตาม", .cn: "排序", .it: "Ordina per", .jp: "並び替え"],
         "sort_title": [.en: "Title", .th: "ชื่อหนังสือ", .cn: "标题", .it: "Titolo", .jp: "タイトル"],
         "sort_format": [.en: "Format", .th: "ฟอร์แมต", .cn: "格式", .it: "Formato", .jp: "形式"],
+        "sort_favorite": [.en: "Favorite", .th: "รายการโปรด", .cn: "收藏", .it: "Preferito", .jp: "お気に入り"],
         "sort_progress": [.en: "Progress", .th: "ความคืบหน้า", .cn: "进度", .it: "Avanzamento", .jp: "進捗"],
+        "sort_last_opened": [.en: "Last opened", .th: "เปิดอ่านล่าสุด", .cn: "上次打开", .it: "Ultima apertura", .jp: "最後に開いた"],
+        "sort_date_added": [.en: "Date added", .th: "วันที่เพิ่ม", .cn: "添加日期", .it: "Data aggiunta", .jp: "追加日"],
         "sort_ascending": [.en: "Ascending", .th: "น้อยไปมาก", .cn: "升序", .it: "Crescente", .jp: "昇順"],
         "sort_descending": [.en: "Descending", .th: "มากไปน้อย", .cn: "降序", .it: "Decrescente", .jp: "降順"],
         "cbz_open_failed": [.en: "Could not open CBZ", .th: "เปิด CBZ ไม่ได้", .cn: "无法打开 CBZ", .it: "Impossibile aprire CBZ", .jp: "CBZ を開けません"],
@@ -3050,6 +4058,8 @@ private enum L10n {
         "reset_zoom": [.en: "Reset zoom", .th: "รีเซ็ตซูม", .cn: "重置缩放", .it: "Reimposta zoom", .jp: "ズームをリセット"],
         "bookmark": [.en: "Bookmark", .th: "บุ๊กมาร์ก", .cn: "书签", .it: "Segnalibro", .jp: "ブックマーク"],
         "bookmarks": [.en: "Bookmarks", .th: "บุ๊กมาร์ก", .cn: "书签列表", .it: "Segnalibri", .jp: "ブックマーク一覧"],
+        "table_of_contents": [.en: "Table of contents", .th: "สารบัญ", .cn: "目录", .it: "Indice", .jp: "目次"],
+        "more": [.en: "More", .th: "เพิ่มเติม", .cn: "更多", .it: "Altro", .jp: "その他"],
         "no_bookmarks": [.en: "No bookmarks", .th: "ยังไม่มีบุ๊กมาร์ก", .cn: "没有书签", .it: "Nessun segnalibro", .jp: "ブックマークがありません"],
         "no_pages": [.en: "No pages", .th: "ไม่มีหน้า", .cn: "没有页面", .it: "Nessuna pagina", .jp: "ページがありません"],
         "page": [.en: "Page", .th: "หน้า", .cn: "页", .it: "Pagina", .jp: "ページ"],
@@ -3415,6 +4425,15 @@ private enum EBookFormat: String, CaseIterable {
 }
 
 private enum BookFileStore {
+    static func fileSize(at url: URL) -> Int64? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber else {
+            return nil
+        }
+
+        return size.int64Value
+    }
+
     static func copyIntoLibrary(_ sourceURL: URL) throws -> URL {
         let fileManager = FileManager.default
         let supportURL = try fileManager.url(
@@ -3466,6 +4485,14 @@ private enum CoverImageStore {
 
         guard let sourceImage else { return nil }
         return try saveCover(sourceImage, named: bookURL.deletingPathExtension().lastPathComponent)
+    }
+
+    static func createCustomCover(from imageURL: URL, named name: String) throws -> URL? {
+        guard let image = NSImage(contentsOf: imageURL) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        return try saveCover(image, named: name)
     }
 
     private static func epubCoverImage(in extractedURL: URL) throws -> NSImage? {
@@ -3786,9 +4813,13 @@ class Book {
     var fileFormat: String = ""
     var coverImagePath: String?
     var lastReadPage: Int = 0
+    var lastPageCount: Int = 0
+    var isFavorite: Bool = false
+    var dateAdded: Date?
+    var lastOpenedAt: Date?
     var shelf: Shelf?
 
-    init(title: String, author: String, colorHex: String, filePath: String? = nil, fileFormat: String = "", coverImagePath: String? = nil, lastReadPage: Int = 0) {
+    init(title: String, author: String, colorHex: String, filePath: String? = nil, fileFormat: String = "", coverImagePath: String? = nil, lastReadPage: Int = 0, lastPageCount: Int = 0, dateAdded: Date? = Date(), lastOpenedAt: Date? = nil) {
         self.title = title
         self.author = author
         self.colorHex = colorHex
@@ -3796,6 +4827,9 @@ class Book {
         self.fileFormat = fileFormat
         self.coverImagePath = coverImagePath
         self.lastReadPage = lastReadPage
+        self.lastPageCount = lastPageCount
+        self.dateAdded = dateAdded
+        self.lastOpenedAt = lastOpenedAt
     }
 
     var fileURL: URL? {
@@ -3830,6 +4864,53 @@ class Book {
         case nil:
             return "doc"
         }
+    }
+
+    var readingProgressFraction: Double {
+        guard lastPageCount > 0 else {
+            return lastReadPage > 0 ? 0.01 : 0
+        }
+        return min(max(Double(lastReadPage + 1) / Double(lastPageCount), 0), 1)
+    }
+
+    var readingProgressText: String {
+        guard lastPageCount > 0 else {
+            return lastReadPage > 0 ? "-" : "0%"
+        }
+        return "\(Int((readingProgressFraction * 100).rounded()))%"
+    }
+
+    fileprivate func readingPageLabel(_ language: SystemLanguage) -> String {
+        if lastPageCount > 0 {
+            return "\(L10n.text("page", language)) \(min(lastReadPage + 1, lastPageCount)) / \(lastPageCount)"
+        }
+        return "\(L10n.text("page", language)) \(lastReadPage + 1)"
+    }
+
+    fileprivate func readingProgressLabel(_ language: SystemLanguage) -> String {
+        if lastPageCount > 0 {
+            return "\(readingPageLabel(language)) - \(readingProgressText)"
+        }
+        return readingPageLabel(language)
+    }
+
+    fileprivate func dateAddedText(_ language: SystemLanguage) -> String {
+        formattedDate(dateAdded, language: language)
+    }
+
+    fileprivate func lastOpenedText(_ language: SystemLanguage) -> String {
+        formattedDate(lastOpenedAt, language: language)
+    }
+
+    private func formattedDate(_ date: Date?, language: SystemLanguage) -> String {
+        guard let date else {
+            return L10n.text("never", language)
+        }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        formatter.locale = language.locale
+        return formatter.string(from: date)
     }
 }
 
@@ -3878,6 +4959,79 @@ private struct FirstMouseAcceptingView: NSViewRepresentable {
     private final class FirstMouseView: NSView {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
             true
+        }
+    }
+}
+
+private struct ReaderKeyboardHandler: NSViewRepresentable {
+    enum Key {
+        case left
+        case right
+    }
+
+    let onKey: (Key) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onKey: onKey)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.installMonitor()
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onKey = onKey
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.removeMonitor()
+    }
+
+    final class Coordinator {
+        var onKey: (Key) -> Void
+        private var monitor: Any?
+
+        init(onKey: @escaping (Key) -> Void) {
+            self.onKey = onKey
+        }
+
+        func installMonitor() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, !Self.isTextInputActive else { return event }
+
+                let disallowedModifiers: NSEvent.ModifierFlags = [.command, .option, .control]
+                guard event.modifierFlags.intersection(disallowedModifiers).isEmpty else { return event }
+
+                switch event.keyCode {
+                case 123:
+                    onKey(.left)
+                    return nil
+                case 124:
+                    onKey(.right)
+                    return nil
+                default:
+                    return event
+                }
+            }
+        }
+
+        func removeMonitor() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            monitor = nil
+        }
+
+        private static var isTextInputActive: Bool {
+            guard let responder = NSApp.keyWindow?.firstResponder else { return false }
+            return responder is NSTextView || responder is NSTextField
+        }
+
+        deinit {
+            removeMonitor()
         }
     }
 }
